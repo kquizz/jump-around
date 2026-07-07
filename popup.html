@@ -1,29 +1,20 @@
 <!DOCTYPE html>
 <!--
-  This is the popup — the little window that appears when you click the
-  stumble icon in the toolbar. It is a 100% ordinary web page. Nothing
-  special about the HTML at all; what's special is WHERE it runs:
+  Step 2 popup. Same lifecycle rules as step 1 (born on click, dies on
+  blur, JS re-runs from scratch every open), but now it's mostly a
+  TRIGGER: the Jump button doesn't do the jumping itself. It fires a
+  message to the service worker and lets the worker do the durable work,
+  because the worker outlives this popup. See popup.js and
+  service-worker.js for the why.
 
-    * It renders in a small dropdown anchored to the toolbar icon.
-    * Its JavaScript gets access to the chrome.* extension APIs.
-    * It is created from scratch EVERY time you click the icon, and
-      destroyed the instant it loses focus (click anywhere else and
-      it's gone — along with every variable in its JavaScript).
-
-  That last point is the single most important thing to internalize
-  about popups. There is no "app state" living here between opens.
-  Anything you want to survive goes in chrome.storage. popup.js
-  demonstrates this with a counter.
+  The counts shown here (seen / total) are read FRESH every time the
+  popup opens — that's the reliable way to observe state that the worker
+  changed, since the popup can't count on being alive after a jump.
 -->
 <html>
 <head>
   <meta charset="utf-8" />
   <style>
-    /*
-      The popup sizes itself to its content, within limits Chrome
-      imposes (max ~800x600). Without an explicit width it can render
-      comically narrow, so setting one on body is the convention.
-    */
     body {
       width: 320px;
       font-family: system-ui, sans-serif;
@@ -34,33 +25,38 @@
     h1 { font-size: 16px; margin: 0 0 12px; }
     .label { color: #666; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; }
     .value { margin: 2px 0 12px; word-break: break-all; }
-    button { padding: 6px 12px; cursor: pointer; }
+    #jump {
+      display: block; width: 100%;
+      padding: 12px; margin: 4px 0 12px;
+      font-size: 16px; font-weight: 600;
+      cursor: pointer;
+      border: 1px solid #888; border-radius: 8px;
+      background: #f5f5f5;
+    }
+    #jump:hover { background: #ececec; }
+    .row { display: flex; justify-content: space-between; align-items: baseline; }
+    .small { font-size: 12px; color: #888; }
+    #reset { font-size: 12px; padding: 4px 8px; cursor: pointer; }
   </style>
 </head>
 <body>
   <h1>stumble 🎲</h1>
 
-  <!-- popup.js fills these in. They start as placeholders so that if
-       the script ever fails to run, you SEE that it failed instead of
-       staring at a blank popup wondering what's wrong. -->
-  <div class="label">Current tab URL</div>
-  <div class="value" id="current-url">loading…</div>
+  <!-- The star of step 2. -->
+  <button id="jump">Jump →</button>
 
-  <div class="label">Times this popup has been opened</div>
-  <div class="value" id="open-count">loading…</div>
+  <div class="row">
+    <span class="small" id="progress">seen 0 of 0</span>
+    <button id="reset">reset history</button>
+  </div>
 
-  <button id="reset">Reset counter</button>
+  <div class="label">Current tab</div>
+  <div class="value small" id="current-url">loading…</div>
 
-  <!--
-    Why a separate file instead of an inline <script>? Extensions run
-    under a strict Content Security Policy (CSP): inline scripts are
-    flatly banned, as is eval(). If you write <script>alert('hi')</script>
-    here, Chrome silently refuses to run it. Everything must live in a
-    .js file shipped inside the extension.
+  <!-- Foreshadowing step 3: the identity we minted on install. -->
+  <div class="label">Your client id</div>
+  <div class="value small" id="client-uuid">loading…</div>
 
-    type="module" buys us top-level await, which keeps popup.js free
-    of async-wrapper boilerplate.
-  -->
   <script type="module" src="popup.js"></script>
 </body>
 </html>
