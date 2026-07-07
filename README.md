@@ -33,7 +33,7 @@ Load it, then actually do these — each one demonstrates a rule of the platform
 1. **Open the popup a few times.** The counter climbs by one per open, because `popup.js` runs top-to-bottom *every single open*. The popup has no persistent life; `chrome.storage` is what persists.
 2. **Right-click inside the popup → Inspect.** Full DevTools for the popup. Bonus: the popup normally dies on focus loss, but stays alive while its DevTools is open — that's how you keep it around long enough to debug.
 3. **In that console, run** `await chrome.storage.local.get(null)` — dumps the whole store. Then `chrome.storage.local.set({openCount: 9000})` and reopen. There's no magic: storage is just a little async database you can read and write from anywhere in the extension.
-4. **Open the popup on a `chrome://` page** (like `chrome://extensions` itself). The URL shows the fallback text — extensions are walled off from browser-internal pages, no matter what permissions they hold.
+4. **Open the popup on a `chrome://` page** (like `chrome://extensions` itself). The URL still shows — clicking the icon grants `activeTab` even on browser-internal pages, so *reading* the URL works anywhere. The wall is around *acting*: content scripts and script injection are refused on `chrome://` pages, the Chrome Web Store, and other extensions' pages, no matter what permissions you hold. (Which is why "Recommend" will work everywhere, but a future page-overlay feature wouldn't.)
 5. **Break it on purpose:** add `<script>console.log('hi')</script>` directly in `popup.html`, reload, inspect. Nothing runs and the console shows a Content Security Policy refusal. Inline script is banned in extensions — all JS lives in files.
 
 ## Roadmap
