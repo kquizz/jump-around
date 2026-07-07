@@ -1,4 +1,4 @@
-# stumble 🎲
+# JumpAround 🎲
 
 Rediscover the weird web — a StumbleUpon-style extension: recommend pages, jump to something new.
 
@@ -9,7 +9,7 @@ Currently at **step 2 of 3**: a working Jump button — hardcoded pool, a servic
 1. Open `chrome://extensions`
 2. Toggle **Developer mode** (top right)
 3. Click **Load unpacked** and pick this folder
-4. Click the puzzle-piece icon in the toolbar and pin **stumble**
+4. Click the puzzle-piece icon in the toolbar and pin **JumpAround**
 
 That's the entire toolchain. After editing a file, hit the ↻ reload icon on the extension's card in `chrome://extensions` and reopen the popup. (Strictly, popup-only changes apply on reopen without even reloading — but reloading always works, so just make it a habit.)
 
@@ -54,7 +54,7 @@ Load it, then actually do these — each one demonstrates a rule of the platform
 ### Step 2 pokes (do these after reloading)
 
 6. **Jump.** Click **Jump →**. The tab navigates to a random page and the popup vanishes. Reopen it: "seen" went up by one. Keep jumping — each page appears at most once until you've seen all 16, then it wraps around and the count resets. That wrap is the worker's `handleJump` refilling from an empty `unseen`.
-7. **Watch the worker.** `chrome://extensions` → stumble card → click the **service worker** link for its own DevTools. Jump with that console open and you'll see it log the minted UUID on first install. If the link says "(inactive)", the worker was asleep — Chrome spins it back up the instant your click sends a message. That waking-from-nothing is the MV3 model in action.
+7. **Watch the worker.** `chrome://extensions` → JumpAround card → click the **service worker** link for its own DevTools. Jump with that console open and you'll see it log the minted UUID on first install. If the link says "(inactive)", the worker was asleep — Chrome spins it back up the instant your click sends a message. That waking-from-nothing is the MV3 model in action.
 8. **Prove state is shared, not local.** In the worker console: `await chrome.storage.local.get('visited')` — the same object the popup reads. Two separate programs, one source of truth.
 9. **Kill the worker mid-thought.** On the extension card, click **service worker** then the **stop/trash** control (or just wait ~30s for "inactive"). Jump anyway — it still works, because the message wakes a fresh worker. There was never a running process to depend on.
 

@@ -19,7 +19,7 @@
  * chrome.storage — the same store the popup reads and writes. That
  * shared store is how these two separate little programs stay in sync.
  *
- * TO DEBUG IT: chrome://extensions → the stumble card → click the
+ * TO DEBUG IT: chrome://extensions → the JumpAround card → click the
  * "service worker" link. That opens DevTools scoped to the worker, with
  * its own console. If the link says "(inactive)", the worker has been
  * put to sleep — clicking it wakes it up.
@@ -48,7 +48,7 @@ chrome.runtime.onInstalled.addListener(async () => {
   if (!clientUuid) {
     const fresh = crypto.randomUUID();
     await chrome.storage.local.set({ clientUuid: fresh });
-    console.log('[stumble] minted client UUID:', fresh);
+    console.log('[JumpAround] minted client UUID:', fresh);
   }
 });
 
@@ -133,7 +133,7 @@ async function handleJump() {
   // THEN navigate. We ask for the active tab just to get its id; we
   // don't read its URL, so no "tabs" permission is needed (see the note
   // in manifest's README). tabs.update changes where that tab points —
-  // this is the actual "stumble" to a new page.
+  // this is the actual "jump" to a new page.
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   await chrome.tabs.update(tab.id, { url: pick.url });
 
