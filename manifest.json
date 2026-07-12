@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "JumpAround",
   "description": "Rediscover the weird web — recommend pages, jump to something new.",
-  "version": "0.1.0",
+  "version": "0.2.0",
 
   "action": {
     "default_popup": "popup.html",
@@ -14,5 +14,10 @@
     "type": "module"
   },
 
-  "permissions": ["storage", "activeTab"]
+  "permissions": ["storage", "activeTab"],
+
+  "host_permissions": [
+    "https://jumparound.kquizz.com/*",
+    "http://localhost:3000/*"
+  ]
 }

@@ -1,48 +1,36 @@
 /*
- * service-worker.js — the "background" context. The single most
- * misunderstood part of a Chrome extension, so read this bit slowly.
+ * service-worker.js (step 3) — now talking to the real backend.
  *
- * WHAT IT IS: a JavaScript environment with NO window, NO document, NO
- * DOM. It can't show UI. What it CAN do is listen for events and call
- * chrome.* APIs. Think of it as the extension's backstage crew.
+ * The big change from step 2: the jump pool no longer comes from the
+ * hardcoded pages.js. It comes from `GET /jump` on your live API. This
+ * worker also gained two new jobs — recommending the current page
+ * (`POST /pages`) and reporting a bad one (`POST /reports`).
  *
- * WHEN IT RUNS: it is NOT always running. Chrome starts it when an event
- * it cares about fires (a message arrives, an alarm goes off, the
- * extension is installed), lets it work, and then TERMINATES it after
- * ~30 seconds of idle to save memory. It will be started and killed
- * many times a day. (Older "background page" tutorials assume it runs
- * forever — that was MV2. It doesn't anymore.)
+ * The lifecycle rules from step 2 still hold and still matter:
+ *   - This worker is ephemeral. Chrome starts it on an event and kills it
+ *     after ~30s idle. Never keep state in a module variable expecting it
+ *     to survive — durable state lives in chrome.storage.
+ *   - Replies to the popup use the `return true` trick so async responses
+ *     don't get dropped (see the onMessage router below).
  *
- * THE CONSEQUENCE: you cannot keep state in a module-level variable and
- * expect it to survive. `let jumpCount = 0` up here would silently reset
- * to 0 every time the worker restarts. Durable state lives in
- * chrome.storage — the same store the popup reads and writes. That
- * shared store is how these two separate little programs stay in sync.
- *
- * TO DEBUG IT: chrome://extensions → the JumpAround card → click the
- * "service worker" link. That opens DevTools scoped to the worker, with
- * its own console. If the link says "(inactive)", the worker has been
- * put to sleep — clicking it wakes it up.
+ * NEW mental model for the jump pool — the "candidate buffer":
+ *   Hitting the network on every single Jump would be slow and chatty. So
+ *   when we need pages, we fetch a BATCH (~50) once, stash it in storage as
+ *   `candidates`, and serve jumps out of that buffer until it's drained.
+ *   Only then do we go back to the server. The server hands out a *random*
+ *   batch, and we filter it against the local `visited` set — so the
+ *   "don't show me the same thing twice" logic stays entirely client-side,
+ *   exactly as designed.
  */
 
-import { PAGES } from './pages.js';
+import { API_BASE } from './config.js';
+import { PAGES } from './pages.js'; // fallback pool if the API is unreachable
 
 /* ------------------------------------------------------------------ *
- * Lifecycle: onInstalled — the "run exactly once" hook
- * ------------------------------------------------------------------ *
- *
- * onInstalled fires when the extension is first installed, updated to a
- * new version, or when Chrome itself updates. It's the canonical place
- * for one-time setup. We use it to mint the client's permanent identity:
- * a random UUID that, in step 3, we'll send to the server with every
- * submission so it can rate-limit and ban by client rather than by IP.
- *
- * We guard with an existence check so a version bump (which also fires
- * onInstalled) doesn't overwrite an identity we already have.
- *
- * crypto.randomUUID() is a standard web API available here in the
- * worker — no library needed.
- */
+ * Lifecycle: mint the client's permanent identity exactly once.
+ * (Unchanged from step 2 — this UUID is what the API rate-limits and
+ * bans by, and it's what we send with every recommendation.)
+ * ------------------------------------------------------------------ */
 chrome.runtime.onInstalled.addListener(async () => {
   const { clientUuid } = await chrome.storage.local.get('clientUuid');
   if (!clientUuid) {
@@ -53,99 +41,143 @@ chrome.runtime.onInstalled.addListener(async () => {
 });
 
 /* ------------------------------------------------------------------ *
- * Messaging: the router — how the popup talks to the worker
- * ------------------------------------------------------------------ *
- *
- * The popup and the worker are separate JavaScript worlds; they can't
- * call each other's functions or share variables. They communicate by
- * passing JSON messages. The popup calls chrome.runtime.sendMessage(msg)
- * and this listener receives it.
- *
- * THE ONE GOTCHA THAT TRIPS UP EVERYONE — `return true`:
- *
- * onMessage listeners can reply to the sender via sendResponse(). But
- * Chrome assumes you'll reply SYNCHRONOUSLY. The moment this callback
- * returns, Chrome closes the messaging channel — so if your reply comes
- * later (after an `await`), it arrives to a dead channel and is lost.
- *
- * The fix is to `return true` from the listener, which tells Chrome
- * "I'm going to respond asynchronously, keep the channel open." Miss
- * this and async replies vanish with no error. It's the #1 messaging
- * bug in all of MV3.
- *
- * Note we do NOT make the listener itself `async`. An async function
- * returns a Promise (truthy, but not the literal `true` Chrome checks
- * for), so the idiom is: sync listener, kick off async work, return true.
- */
+ * Messaging router. Same `return true` rule as step 2: kick off async
+ * work, return true to keep the channel open for the later reply.
+ * ------------------------------------------------------------------ */
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  if (message.type === 'jump') {
-    handleJump().then(sendResponse);
-    return true; // "response is coming later" — keep the channel open
+  switch (message.type) {
+    case 'jump':
+      handleJump().then(sendResponse);
+      return true;
+    case 'recommend':
+      handleRecommend(message).then(sendResponse);
+      return true;
+    case 'report':
+      handleReport(message).then(sendResponse);
+      return true;
+    case 'resetVisited':
+      chrome.storage.local
+        .set({ visited: {}, candidates: [] })
+        .then(() => sendResponse({ ok: true }));
+      return true;
+    default:
+      return false; // let the channel close
   }
-
-  if (message.type === 'resetVisited') {
-    chrome.storage.local.set({ visited: {} }).then(() => sendResponse({ ok: true }));
-    return true;
-  }
-
-  // Falling through (no return / return false) lets the channel close.
 });
 
 /* ------------------------------------------------------------------ *
- * The Jump itself — and the payoff for doing this in the worker
- * ------------------------------------------------------------------ *
- *
- * Recall the popup-death gotcha from step 1: if the popup tried to
- * "navigate, THEN record visited", navigating the tab kills the popup
- * mid-function and the visited-write is lost. Here in the worker there
- * is no such risk — the worker outlives the popup and the tab
- * navigation. So we deliberately do the durable write FIRST, then
- * navigate. Order matters, and this ordering is the whole reason Jump
- * lives in the worker.
- */
+ * fetchBatch — ask the API for a random batch of pages matching the
+ * user's tag filter. Falls back to the bundled pages.js if the network
+ * (or the whole server) is down, so Jump never hard-fails.
+ * ------------------------------------------------------------------ */
+async function fetchBatch(tagIds) {
+  const params = new URLSearchParams({ limit: '50' });
+  if (tagIds.length) params.set('tags', tagIds.join(','));
+
+  try {
+    const res = await fetch(`${API_BASE}/jump?${params.toString()}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.json(); // [{ id, url, tags }]
+  } catch (err) {
+    console.warn('[JumpAround] /jump failed, using bundled fallback:', err);
+    // Fallback entries have id: null — they can't be reported (no server
+    // record exists), which handleReport accounts for.
+    return PAGES.map((p) => ({ id: null, url: p.url, tags: [] }));
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * handleJump — serve one page from the candidate buffer, refilling from
+ * the API when the buffer runs dry. Durable write (visited) happens
+ * BEFORE navigation, same as step 2, because navigating kills the popup.
+ * ------------------------------------------------------------------ */
 async function handleJump() {
-  // `visited` is an object used as a set: { "<url>": true }. Object
-  // lookup is O(1), and objects are JSON-serializable so they store
-  // cleanly. Default to {} for the very first jump.
-  let { visited = {} } = await chrome.storage.local.get('visited');
+  const store = await chrome.storage.local.get(['visited', 'selectedTags', 'candidates']);
+  let visited = store.visited ?? {};
+  const selectedTags = store.selectedTags ?? [];
 
-  // Everything we haven't sent the user to yet.
-  let unseen = PAGES.filter((page) => !visited[page.url]);
+  // Everything buffered that we haven't already sent the user to.
+  let pool = (store.candidates ?? []).filter((p) => !visited[p.url]);
 
-  // Exhausted the whole list? Wrap around: forget history and start the
-  // cycle over. In step 3 this is the moment we'd fetch a fresh batch
-  // from the server instead.
-  let wrapped = false;
-  if (unseen.length === 0) {
-    visited = {};
-    unseen = PAGES;
-    wrapped = true;
+  // Buffer drained? Refill from the server.
+  if (pool.length === 0) {
+    const batch = await fetchBatch(selectedTags);
+    pool = batch.filter((p) => !visited[p.url]);
+
+    // Server had pages but we've seen them all → wrap around: forget
+    // history and start the cycle over with the fresh batch.
+    if (pool.length === 0 && batch.length > 0) {
+      visited = {};
+      pool = batch;
+    }
   }
 
-  // Pick one at random. (Math.random is fine in extension code — it's
-  // real browser JS, not a sandbox.)
-  const pick = unseen[Math.floor(Math.random() * unseen.length)];
+  if (pool.length === 0) {
+    return { error: 'No pages available right now.' };
+  }
 
-  // DURABLE WRITE FIRST — mark it seen before we touch the tab.
+  const pick = pool[Math.floor(Math.random() * pool.length)];
+
+  // DURABLE WRITE FIRST: mark seen + save the drained buffer + remember
+  // what we jumped to (so Report knows the current page's server id).
   visited[pick.url] = true;
-  await chrome.storage.local.set({ visited });
+  const remaining = pool.filter((p) => p.url !== pick.url);
+  await chrome.storage.local.set({
+    visited,
+    candidates: remaining,
+    lastJump: { id: pick.id, url: pick.url },
+  });
 
-  // THEN navigate. We ask for the active tab just to get its id; we
-  // don't read its URL, so no "tabs" permission is needed (see the note
-  // in manifest's README). tabs.update changes where that tab points —
-  // this is the actual "jump" to a new page.
+  // THEN navigate the active tab.
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   await chrome.tabs.update(tab.id, { url: pick.url });
 
-  // Reply to the popup. It may already be closing (navigating the active
-  // tab tends to dismiss it), so the popup can't RELY on this landing —
-  // which is exactly why the popup reads its counts fresh on open
-  // instead. This response is a nice-to-have, not the source of truth.
-  return {
-    url: pick.url,
-    title: pick.title,
-    seen: Object.keys(visited).length,
-    total: PAGES.length,
-    wrapped,
-  };
+  return { url: pick.url, seen: Object.keys(visited).length };
+}
+
+/* ------------------------------------------------------------------ *
+ * handleRecommend — POST the current tab's URL to the API. The server
+ * decides whether it goes live immediately (trusted submitter) or waits
+ * in the pending queue (first-timer), and tells us which.
+ * ------------------------------------------------------------------ */
+async function handleRecommend({ tagIds = [] }) {
+  const { clientUuid } = await chrome.storage.local.get('clientUuid');
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab?.url) return { ok: false, error: 'No page to recommend.' };
+
+  try {
+    const res = await fetch(`${API_BASE}/pages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: tab.url, client_uuid: clientUuid, tag_ids: tagIds }),
+    });
+    const data = await res.json();
+    if (!res.ok) return { ok: false, error: data.error ?? res.statusText };
+    return { ok: true, status: data.status, already: data.already_exists ?? false };
+  } catch (err) {
+    return { ok: false, error: String(err) };
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * handleReport — flag the page we most recently jumped to. Only works on
+ * server-backed pages (lastJump.id present); bundled-fallback pages have
+ * no server record to report.
+ * ------------------------------------------------------------------ */
+async function handleReport({ reason = '' }) {
+  const { clientUuid, lastJump } = await chrome.storage.local.get(['clientUuid', 'lastJump']);
+  if (!lastJump?.id) {
+    return { ok: false, error: 'Jump to a page first, then report it.' };
+  }
+
+  try {
+    const res = await fetch(`${API_BASE}/reports`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ page_id: lastJump.id, client_uuid: clientUuid, reason }),
+    });
+    return { ok: res.ok };
+  } catch (err) {
+    return { ok: false, error: String(err) };
+  }
 }

@@ -1,18 +1,19 @@
 /*
- * pages.js — the hardcoded jump pool for step 2.
+ * pages.js — the OFFLINE FALLBACK jump pool.
  *
- * This is a stand-in. In step 3 this whole file disappears and the list
- * comes from `GET /jump` on your server as [{uuid, url, tag_ids}]. For
- * now it's a flat, hand-picked list of classic "wonderful web" pages so
- * that Jump has somewhere to send you before any backend exists.
+ * As of step 3 the real jump pool comes from `GET /jump` on your live API
+ * (see service-worker.js → fetchBatch). But we kept this hand-picked list
+ * of classic "wonderful web" pages as a safety net: if the network or the
+ * whole server is unreachable, fetchBatch falls back to these so Jump
+ * never hard-fails. Fallback entries have no server id, so they can't be
+ * reported — there's no record on the server to report.
  *
  * It's an ES module: it `export`s a constant, and the service worker
  * `import`s it. That's why manifest.json marks the worker as
  * "type": "module" — without that, `import` isn't allowed there.
  *
- * Each entry has a `title` purely for display/logging; jumping only
- * needs `url`. When this becomes server data, `url` stays the key we
- * track "visited" by (until step 3 switches us to tracking by uuid).
+ * Each entry has a `title` for display/logging; jumping only needs `url`,
+ * which is also the key we track "visited" by.
  */
 
 export const PAGES = [

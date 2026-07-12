@@ -1,67 +1,145 @@
 /*
- * popup.js (step 2) — now a thin trigger for the service worker.
+ * popup.js (step 3) — thin trigger for the worker, now with live data.
  *
- * The mental split to hold onto:
- *   - POPUP  = UI. Reads state to display it, fires messages on click.
- *              Fragile: can die at any moment.
- *   - WORKER = does the durable work (write visited, navigate the tab).
- *              Robust: outlives the popup.
+ * The split from step 2 still holds:
+ *   - POPUP  = UI. Paints state on open, sends messages on click. Fragile.
+ *   - WORKER = durable work (fetch batch, navigate, POST to the API).
  *
- * So this file does two jobs: (1) paint the current state on open, and
- * (2) send a 'jump' message when the button is clicked. It does NOT
- * write visited or navigate — that would reintroduce the popup-death
- * bug from step 1.
+ * What's new: on open we fetch the tag list from the API and build two
+ * checkbox groups from it — one for tagging a recommendation, one for the
+ * jump filter. Everything else is wiring buttons to worker messages.
  */
 
-import { PAGES } from './pages.js';
+import { API_BASE } from './config.js';
 
-/* --- Paint current state on open (this always runs, popup is alive) --- */
+/* --- tiny DOM helpers --- */
+const $ = (id) => document.getElementById(id);
+const setStatus = (el, msg, ok) => {
+  el.textContent = msg;
+  el.className = `status ${ok ? 'ok' : 'err'}`;
+};
 
-// Read everything we want to display in one storage call.
-const { visited = {}, clientUuid } = await chrome.storage.local.get([
+/* --- Paint current state on open (popup is alive right now) --- */
+const { visited = {}, clientUuid, selectedTags = [] } = await chrome.storage.local.get([
   'visited',
   'clientUuid',
+  'selectedTags',
 ]);
 
-const seen = Object.keys(visited).length;
-document.getElementById('progress').textContent = `seen ${seen} of ${PAGES.length}`;
+$('progress').textContent = `${Object.keys(visited).length} seen`;
+$('client-uuid').textContent = clientUuid ?? '(minting…)';
 
-// clientUuid is minted by the worker's onInstalled handler. On a brand
-// new install there's a tiny chance the popup opens before that ran, so
-// we show a friendly placeholder rather than "undefined".
-document.getElementById('client-uuid').textContent = clientUuid ?? '(minting…)';
+/* --- Fetch the tag list (fallback to whatever we cached last time) --- */
+async function loadTags() {
+  try {
+    const res = await fetch(`${API_BASE}/tags`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const tags = await res.json(); // [{ id, name }]
+    await chrome.storage.local.set({ cachedTags: tags });
+    return tags;
+  } catch (_err) {
+    const { cachedTags = [] } = await chrome.storage.local.get('cachedTags');
+    return cachedTags;
+  }
+}
 
-// Current tab URL, same as step 1.
-const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-document.getElementById('current-url').textContent = tab.url ?? '(not visible here)';
+// Build a group of tag checkboxes into `container`. `checkedIds` pre-checks
+// some; `onChange` (optional) fires whenever any box toggles.
+function renderTagCheckboxes(container, tags, checkedIds, onChange) {
+  container.innerHTML = '';
+  if (tags.length === 0) {
+    container.innerHTML = '<span class="small">no tags available</span>';
+    return;
+  }
+  for (const tag of tags) {
+    const label = document.createElement('label');
+    const box = document.createElement('input');
+    box.type = 'checkbox';
+    box.value = String(tag.id);
+    box.checked = checkedIds.includes(tag.id);
+    if (onChange) box.addEventListener('change', onChange);
+    label.append(box, document.createTextNode(tag.name));
+    container.appendChild(label);
+  }
+}
 
-/* --- The Jump button: fire a message, let the worker take over --- */
+// Collect the checked tag ids (as numbers) from a checkbox container.
+function checkedTagIds(container) {
+  return [...container.querySelectorAll('input:checked')].map((b) => Number(b.value));
+}
 
-document.getElementById('jump').addEventListener('click', async () => {
-  // sendMessage returns a Promise that resolves with whatever the
-  // worker passed to sendResponse. Because the worker navigates the
-  // active tab, THIS POPUP LIKELY CLOSES before the reply lands — so we
-  // can't depend on the code after this await running. That's fine:
-  // the worker already did the real work (marked visited + navigated)
-  // before replying. Reopen the popup to watch "seen" climb.
-  //
-  // We wrap in try/catch because "message channel closed before a
-  // response was received" is an expected, benign outcome when the
-  // popup dies mid-flight — not a real error.
+const tags = await loadTags();
+
+// Recommend panel: no pre-checked tags.
+renderTagCheckboxes($('rec-tags'), tags, []);
+
+// Filter panel: pre-check the user's saved filter. On any change, persist
+// the new filter AND clear the candidate buffer so the next Jump refetches
+// with the new filter instead of serving stale buffered pages.
+renderTagCheckboxes($('filter-tags'), tags, selectedTags, async () => {
+  const ids = checkedTagIds($('filter-tags'));
+  await chrome.storage.local.set({ selectedTags: ids, candidates: [] });
+});
+
+/* --- Panel toggles --- */
+const toggle = (btnId, panelId) =>
+  $(btnId).addEventListener('click', () => $(panelId).classList.toggle('open'));
+toggle('show-recommend', 'recommend-panel');
+toggle('show-report', 'report-panel');
+toggle('show-filter', 'filter-panel');
+
+/* --- Jump: fire and let the worker navigate (popup likely dies here) --- */
+$('jump').addEventListener('click', async () => {
   try {
     const result = await chrome.runtime.sendMessage({ type: 'jump' });
-    if (result) {
-      document.getElementById('progress').textContent =
-        `seen ${result.seen} of ${result.total}`;
-    }
+    if (result?.error) $('progress').textContent = result.error;
+    else if (result) $('progress').textContent = `${result.seen} seen`;
   } catch (_ignored) {
-    // Popup closed before the reply arrived. Expected. The jump happened.
+    // Popup closed before the reply arrived. Expected — the jump happened.
   }
 });
 
-/* --- Reset history: also delegated to the worker --- */
-
-document.getElementById('reset').addEventListener('click', async () => {
+/* --- Reset history --- */
+$('reset').addEventListener('click', async () => {
   await chrome.runtime.sendMessage({ type: 'resetVisited' });
-  document.getElementById('progress').textContent = `seen 0 of ${PAGES.length}`;
+  $('progress').textContent = '0 seen';
+});
+
+/* --- Recommend the current page --- */
+$('rec-submit').addEventListener('click', async () => {
+  const status = $('rec-status');
+  setStatus(status, 'sending…', true);
+  try {
+    const res = await chrome.runtime.sendMessage({
+      type: 'recommend',
+      tagIds: checkedTagIds($('rec-tags')),
+    });
+    if (!res?.ok) {
+      setStatus(status, res?.error ?? 'Something went wrong.', false);
+    } else if (res.already) {
+      setStatus(status, 'Already in the pool — thanks anyway!', true);
+    } else if (res.status === 'active') {
+      setStatus(status, 'Added and live! 🎉', true);
+    } else {
+      setStatus(status, 'Submitted — pending review. Thanks!', true);
+    }
+  } catch (err) {
+    setStatus(status, String(err), false);
+  }
+});
+
+/* --- Report the page we last jumped to --- */
+$('rep-submit').addEventListener('click', async () => {
+  const status = $('rep-status');
+  setStatus(status, 'sending…', true);
+  try {
+    const res = await chrome.runtime.sendMessage({
+      type: 'report',
+      reason: $('rep-reason').value,
+    });
+    if (res?.ok) setStatus(status, 'Reported. Thanks for the heads up.', true);
+    else setStatus(status, res?.error ?? 'Could not send report.', false);
+  } catch (err) {
+    setStatus(status, String(err), false);
+  }
 });

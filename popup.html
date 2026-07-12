@@ -1,15 +1,16 @@
 <!DOCTYPE html>
 <!--
-  Step 2 popup. Same lifecycle rules as step 1 (born on click, dies on
-  blur, JS re-runs from scratch every open), but now it's mostly a
-  TRIGGER: the Jump button doesn't do the jumping itself. It fires a
-  message to the service worker and lets the worker do the durable work,
-  because the worker outlives this popup. See popup.js and
-  service-worker.js for the why.
+  Step 3 popup. Still the same lifecycle as before (born on click, dies on
+  blur, JS re-runs from scratch each open), and still a thin TRIGGER: the
+  buttons fire messages to the service worker, which does the durable work.
 
-  The counts shown here (seen / total) are read FRESH every time the
-  popup opens — that's the reliable way to observe state that the worker
-  changed, since the popup can't count on being alive after a jump.
+  What's new in step 3 is the extra UI: besides Jump, you can now
+  Recommend the page you're on and Report a bad one, and pick which tags
+  you want jumps filtered to. The tag lists are fetched live from the API's
+  /tags endpoint every time the popup opens.
+
+  Panels (Recommend / Report / Filter) start hidden and toggle open — that
+  keeps the default view a single big Jump button, like StumbleUpon.
 -->
 <html>
 <head>
@@ -36,24 +37,68 @@
     #jump:hover { background: #ececec; }
     .row { display: flex; justify-content: space-between; align-items: baseline; }
     .small { font-size: 12px; color: #888; }
+    hr { border: none; border-top: 1px solid #eee; margin: 12px 0; }
+    .linkbtn {
+      background: none; border: none; color: #35a; cursor: pointer;
+      font-size: 13px; padding: 4px 0;
+    }
+    .linkbtn:hover { text-decoration: underline; }
+    .panel { display: none; margin: 6px 0 4px; }
+    .panel.open { display: block; }
+    .tags { display: flex; flex-wrap: wrap; gap: 4px 10px; margin: 6px 0; }
+    .tags label { font-size: 12px; display: inline-flex; align-items: center; gap: 3px; }
+    .primary {
+      padding: 6px 10px; border: 1px solid #888; border-radius: 6px;
+      background: #f5f5f5; cursor: pointer; font-size: 13px;
+    }
+    .primary:hover { background: #ececec; }
+    input[type=text] { width: 100%; padding: 6px; box-sizing: border-box; margin: 4px 0; }
+    .status { font-size: 12px; margin-top: 6px; min-height: 14px; }
+    .status.ok { color: #2a7; }
+    .status.err { color: #c33; }
     #reset { font-size: 12px; padding: 4px 8px; cursor: pointer; }
   </style>
 </head>
 <body>
   <h1>JumpAround 🎲</h1>
 
-  <!-- The star of step 2. -->
   <button id="jump">Jump →</button>
 
   <div class="row">
-    <span class="small" id="progress">seen 0 of 0</span>
+    <span class="small" id="progress">0 seen</span>
     <button id="reset">reset history</button>
   </div>
 
-  <div class="label">Current tab</div>
-  <div class="value small" id="current-url">loading…</div>
+  <hr />
 
-  <!-- Foreshadowing step 3: the identity we minted on install. -->
+  <!-- Recommend the current page -->
+  <button class="linkbtn" id="show-recommend">➕ Recommend this page</button>
+  <div class="panel" id="recommend-panel">
+    <div class="label">Tag it (optional)</div>
+    <div class="tags" id="rec-tags"><span class="small">loading tags…</span></div>
+    <button class="primary" id="rec-submit">Submit recommendation</button>
+    <div class="status" id="rec-status"></div>
+  </div>
+
+  <!-- Report the page we last jumped to -->
+  <button class="linkbtn" id="show-report">⚑ Report this page</button>
+  <div class="panel" id="report-panel">
+    <input type="text" id="rep-reason" placeholder="what's wrong with it? (optional)" />
+    <button class="primary" id="rep-submit">Send report</button>
+    <div class="status" id="rep-status"></div>
+  </div>
+
+  <hr />
+
+  <!-- Filter which tags jumps are drawn from -->
+  <button class="linkbtn" id="show-filter">⚙ Filter tags</button>
+  <div class="panel" id="filter-panel">
+    <div class="small">Only jump to these tags (none checked = everything):</div>
+    <div class="tags" id="filter-tags"><span class="small">loading tags…</span></div>
+  </div>
+
+  <hr />
+
   <div class="label">Your client id</div>
   <div class="value small" id="client-uuid">loading…</div>
 
